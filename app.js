@@ -290,7 +290,6 @@ function renderHome() {
 }
 
 function renderSearch() {
-  const results = sortedNotes(filteredNotes());
   shell(`
     <div class="toolbar">
       <input class="input" data-field="query" placeholder="${UI_LABELS.searchPlaceholder}" value="${escapeHtml(searchState.query)}" />
@@ -315,8 +314,17 @@ function renderSearch() {
         <option value="expired" ${searchState.date === "expired" ? "selected" : ""}>期限切れ</option>
       </select>
     </div>
-    ${section("検索結果", results, "条件に合うメモはありません")}
+    <div data-search-results>${searchResultsHtml()}</div>
   `);
+}
+
+function searchResultsHtml() {
+  return section("検索結果", sortedNotes(filteredNotes()), "条件に合うメモはありません");
+}
+
+function updateSearchResults() {
+  const results = document.querySelector("[data-search-results]");
+  if (results) results.innerHTML = searchResultsHtml();
 }
 
 function blankEditor() {
@@ -517,7 +525,7 @@ app.addEventListener("input", (event) => {
   }
   if (target.dataset.field === "query") {
     searchState.query = target.value;
-    renderSearch();
+    updateSearchResults();
   }
 });
 
