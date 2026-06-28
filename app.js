@@ -292,7 +292,10 @@ function renderHome() {
 function renderSearch() {
   shell(`
     <div class="toolbar">
-      <input class="input" data-field="query" placeholder="${UI_LABELS.searchPlaceholder}" value="${escapeHtml(searchState.query)}" />
+      <div class="search-row">
+        <input class="input" data-field="query" enterkeyhint="search" autocomplete="off" placeholder="${UI_LABELS.searchPlaceholder}" value="${escapeHtml(searchState.query)}" />
+        <button class="btn" data-action="runSearch">検索</button>
+      </div>
       <button class="btn primary" data-action="new">＋ ${UI_LABELS.newNote}</button>
     </div>
     <div class="filters">
@@ -525,6 +528,14 @@ app.addEventListener("input", (event) => {
   }
   if (target.dataset.field === "query") {
     searchState.query = target.value;
+  }
+});
+
+app.addEventListener("keydown", (event) => {
+  const target = event.target;
+  if (target.dataset.field === "query" && event.key === "Enter") {
+    event.preventDefault();
+    searchState.query = target.value;
     updateSearchResults();
   }
 });
@@ -562,6 +573,11 @@ app.addEventListener("click", async (event) => {
     if (quick) searchState.query = quick.value;
     route = { page: "search", id: null };
     render();
+  }
+  if (action === "runSearch") {
+    const query = document.querySelector("[data-field='query']");
+    if (query) searchState.query = query.value;
+    updateSearchResults();
   }
   if (action === "new") startEditor(null);
   if (action === "detail") {
