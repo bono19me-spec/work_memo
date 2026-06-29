@@ -18,7 +18,7 @@ const UI_LABELS = {
   addTag: "タグを追加",
   importance: "重要度",
   status: "状態",
-  validUntil: "有効期限",
+  validUntil: "有効期限終了日",
   reviewDate: "確認日",
   checklist: "チェックリスト",
   save: "保存",
@@ -105,7 +105,7 @@ function toDateOnly(value) {
 }
 
 function notePreviewDate(note) {
-  return note.validUntil ? `有効期限 ${note.validUntil}` : `更新 ${toDateOnly(note.updatedAt)}`;
+  return note.validUntil ? `有効期限終了日 ${note.validUntil}` : `更新 ${toDateOnly(note.updatedAt)}`;
 }
 
 function escapeHtml(value = "") {
@@ -436,7 +436,7 @@ function noteCard(note) {
       <div class="meta">
         <span class="pill ${note.importance}">${IMPORTANCE_LABELS[note.importance]}</span>
         <span class="pill ${status}">${STATUS_LABELS[status]}</span>
-        ${note.validUntil ? `<span class="pill">有効期限 ${escapeHtml(note.validUntil)}</span>` : ""}
+        ${note.validUntil ? `<span class="pill">有効期限終了日 ${escapeHtml(note.validUntil)}</span>` : ""}
         ${tags}
       </div>
       <small class="count">${escapeHtml(notePreviewDate(note))}</small>
@@ -677,7 +677,7 @@ function renderDetail() {
       <div class="meta">
         <span class="pill ${note.importance}">${IMPORTANCE_LABELS[note.importance]}</span>
         <span class="pill ${status}">${STATUS_LABELS[status]}</span>
-        ${note.validUntil ? `<span class="pill">有効期限 ${escapeHtml(note.validUntil)}</span>` : ""}
+        ${note.validUntil ? `<span class="pill">有効期限終了日 ${escapeHtml(note.validUntil)}</span>` : ""}
         ${note.reviewDate ? `<span class="pill">確認 ${escapeHtml(note.reviewDate)}</span>` : ""}
       </div>
       <div class="tag-list">${(note.tags || []).map((tag) => `<button class="tag" data-action="tagSearch" data-tag="${escapeHtml(tag)}">#${escapeHtml(tag)}</button>`).join("")}</div>
