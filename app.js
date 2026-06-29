@@ -83,6 +83,8 @@ const TAG_RULES = {
 
 const DB_NAME = "work-memo-db";
 const STORE_NAME = "notes";
+const BACKUP_VERSION = 1;
+const BACKUP_ITERATIONS = 250000;
 const app = document.querySelector("#app");
 
 let notes = [];
@@ -100,6 +102,10 @@ function today() {
 
 function toDateOnly(value) {
   return value ? value.slice(0, 10) : "";
+}
+
+function notePreviewDate(note) {
+  return note.validUntil ? `有効期限 ${note.validUntil}` : `更新 ${toDateOnly(note.updatedAt)}`;
 }
 
 function escapeHtml(value = "") {
@@ -165,6 +171,13 @@ function removeNote(id) {
   return withStore("readwrite", (store) => store.delete(id));
 }
 
+function replaceAllNotes(nextNotes) {
+  return withStore("readwrite", (store) => {
+    store.clear();
+    nextNotes.forEach((note) => store.put(note));
+  });
+}
+
 function suggestTags(title, body) {
   const source = `${title} ${body}`.toLowerCase();
   return Object.entries(TAG_RULES)
@@ -217,6 +230,202 @@ function filteredNotes() {
   });
 }
 
+function bytesToBase64(bytes) {
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function deriveBackupKey(password, salt) {
+  const baseKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: BACKUP_ITERATIONS, hash: "SHA-256" },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+function ensureCryptoAvailable() {
+  if (!window.crypto?.subtle) {
+    throw new Error("このブラウザでは暗号化バックアップを利用できません。HTTPSまたはlocalhostで開いてください。");
+  }
+}
+
+async function createEncryptedBackup(password) {
+  ensureCryptoAvailable();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveBackupKey(password, salt);
+  const payload = {
+    app: "work-memo",
+    version: BACKUP_VERSION,
+    exportedAt: new Date().toISOString(),
+    notes
+  };
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(payload)));
+  return {
+    app: "work-memo",
+    version: BACKUP_VERSION,
+    encrypted: true,
+    kdf: "PBKDF2",
+    iterations: BACKUP_ITERATIONS,
+    cipher: "AES-GCM",
+    salt: bytesToBase64(salt),
+    iv: bytesToBase64(iv),
+    data: bytesToBase64(new Uint8Array(encrypted))
+  };
+}
+
+async function readEncryptedBackup(file, password) {
+  ensureCryptoAvailable();
+  const backup = JSON.parse(await file.text());
+  if (backup.app !== "work-memo" || !backup.encrypted || backup.cipher !== "AES-GCM" || backup.kdf !== "PBKDF2") {
+    throw new Error("業務メモの暗号化バックアップファイルではありません。");
+  }
+  const salt = base64ToBytes(backup.salt);
+  const iv = base64ToBytes(backup.iv);
+  const key = await deriveBackupKey(password, salt);
+  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, base64ToBytes(backup.data));
+  const payload = JSON.parse(new TextDecoder().decode(decrypted));
+  if (payload.app !== "work-memo" || !Array.isArray(payload.notes)) {
+    throw new Error("バックアップ内容を読み込めません。");
+  }
+  return payload.notes.map(normalizeNote);
+}
+
+function normalizeNote(note) {
+  const now = new Date().toISOString();
+  return {
+    id: String(note.id || uid("note")),
+    title: String(note.title || ""),
+    body: String(note.body || ""),
+    tags: Array.isArray(note.tags) ? unique(note.tags.map(String)) : [],
+    autoTags: Array.isArray(note.autoTags) ? unique(note.autoTags.map(String)) : [],
+    dismissedAutoTags: Array.isArray(note.dismissedAutoTags) ? unique(note.dismissedAutoTags.map(String)) : [],
+    manualTags: Array.isArray(note.manualTags) ? unique(note.manualTags.map(String)) : [],
+    importance: ["low", "normal", "high"].includes(note.importance) ? note.importance : "normal",
+    status: ["active", "needs_check", "expired", "archived"].includes(note.status) ? note.status : "active",
+    validUntil: note.validUntil || "",
+    reviewDate: note.reviewDate || "",
+    tasks: Array.isArray(note.tasks)
+      ? note.tasks.map((task) => ({
+          id: String(task.id || uid("task")),
+          text: String(task.text || ""),
+          done: Boolean(task.done),
+          dueDate: task.dueDate || undefined
+        }))
+      : [],
+    createdAt: note.createdAt || now,
+    updatedAt: note.updatedAt || now
+  };
+}
+
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function requestBackupPassword({ confirmPassword = false } = {}) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("div");
+    dialog.className = "modal-backdrop";
+    dialog.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true">
+        <h2>バックアップパスワード</h2>
+        <p>パスワードを忘れると復元できません。</p>
+        <input class="input" type="password" data-password="main" autocomplete="new-password" placeholder="パスワード" />
+        ${
+          confirmPassword
+            ? `<input class="input" type="password" data-password="confirm" autocomplete="new-password" placeholder="確認用パスワード" />`
+            : ""
+        }
+        <div class="actions">
+          <button class="btn ghost" type="button" data-modal="cancel">キャンセル</button>
+          <button class="btn primary" type="button" data-modal="ok">OK</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(dialog);
+    const main = dialog.querySelector("[data-password='main']");
+    const confirmation = dialog.querySelector("[data-password='confirm']");
+    main.focus();
+
+    function close(value) {
+      dialog.remove();
+      resolve(value);
+    }
+
+    dialog.addEventListener("click", (event) => {
+      const action = event.target.dataset.modal;
+      if (action === "cancel") close(null);
+      if (action === "ok") {
+        if (!main.value) return;
+        if (confirmPassword && main.value !== confirmation.value) {
+          alert("パスワードが一致しません。");
+          return;
+        }
+        close(main.value);
+      }
+    });
+
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") close(null);
+      if (event.key === "Enter") {
+        event.preventDefault();
+        dialog.querySelector("[data-modal='ok']").click();
+      }
+    });
+  });
+}
+
+async function exportEncryptedBackup() {
+  try {
+    const password = await requestBackupPassword({ confirmPassword: true });
+    if (!password) return;
+    const backup = await createEncryptedBackup(password);
+    downloadJson(`work-memo-backup-${today()}.wmemo`, backup);
+    alert("暗号化バックアップを書き出しました。");
+  } catch (error) {
+    alert(error.message || "バックアップに失敗しました。");
+  }
+}
+
+async function importEncryptedBackup(file) {
+  try {
+    if (!file) return;
+    const password = await requestBackupPassword();
+    if (!password) return;
+    const importedNotes = await readEncryptedBackup(file, password);
+    const ok = confirm(`現在のメモをバックアップ内の${importedNotes.length}件で置き換えます。よろしいですか？`);
+    if (!ok) return;
+    await replaceAllNotes(importedNotes);
+    notes = sortedNotes(await loadNotes());
+    route = { page: "home", id: null };
+    render();
+    alert("バックアップを復元しました。");
+  } catch (error) {
+    alert("復元できませんでした。パスワードまたはファイルを確認してください。");
+  }
+}
+
 function noteCard(note) {
   const status = effectiveStatus(note);
   const tags = (note.tags || []).slice(0, 5).map((tag) => `<span class="tag">#${escapeHtml(tag)}</span>`).join("");
@@ -227,10 +436,10 @@ function noteCard(note) {
       <div class="meta">
         <span class="pill ${note.importance}">${IMPORTANCE_LABELS[note.importance]}</span>
         <span class="pill ${status}">${STATUS_LABELS[status]}</span>
-        ${note.validUntil ? `<span class="pill">期限 ${escapeHtml(note.validUntil)}</span>` : ""}
+        ${note.validUntil ? `<span class="pill">有効期限 ${escapeHtml(note.validUntil)}</span>` : ""}
         ${tags}
       </div>
-      <small class="count">更新 ${toDateOnly(note.updatedAt)}</small>
+      <small class="count">${escapeHtml(notePreviewDate(note))}</small>
     </button>
   `;
 }
@@ -276,6 +485,11 @@ function renderHome() {
   const expired = ordered.filter((note) => effectiveStatus(note) === "expired").slice(0, 4);
   shell(`
     <div class="notice">このアプリは個人の業務メモ用です。お客様の個人情報、予約番号、電話番号、決済情報などの機密情報を保存しないでください。</div>
+    <section class="backup-panel" aria-label="バックアップ">
+      <button class="btn" data-action="exportBackup">暗号化バックアップを書き出す</button>
+      <button class="btn" data-action="importBackup">暗号化バックアップを復元</button>
+      <input class="visually-hidden" type="file" data-field="backupFile" accept=".wmemo,application/json" />
+    </section>
     <div class="toolbar">
       <div class="search-row">
         <input class="input" data-field="quickSearch" placeholder="${UI_LABELS.searchPlaceholder}" value="${escapeHtml(searchState.query)}" />
@@ -463,7 +677,7 @@ function renderDetail() {
       <div class="meta">
         <span class="pill ${note.importance}">${IMPORTANCE_LABELS[note.importance]}</span>
         <span class="pill ${status}">${STATUS_LABELS[status]}</span>
-        ${note.validUntil ? `<span class="pill">期限 ${escapeHtml(note.validUntil)}</span>` : ""}
+        ${note.validUntil ? `<span class="pill">有効期限 ${escapeHtml(note.validUntil)}</span>` : ""}
         ${note.reviewDate ? `<span class="pill">確認 ${escapeHtml(note.reviewDate)}</span>` : ""}
       </div>
       <div class="tag-list">${(note.tags || []).map((tag) => `<button class="tag" data-action="tagSearch" data-tag="${escapeHtml(tag)}">#${escapeHtml(tag)}</button>`).join("")}</div>
@@ -542,6 +756,10 @@ app.addEventListener("keydown", (event) => {
 
 app.addEventListener("change", (event) => {
   const target = event.target;
+  if (target.dataset.field === "backupFile") {
+    importEncryptedBackup(target.files?.[0]);
+    target.value = "";
+  }
   if (target.dataset.edit && editorState) {
     editorState[target.dataset.edit] = target.value;
     if (target.dataset.edit === "title" || target.dataset.edit === "body") renderEditor();
@@ -578,6 +796,12 @@ app.addEventListener("click", async (event) => {
     const query = document.querySelector("[data-field='query']");
     if (query) searchState.query = query.value;
     updateSearchResults();
+  }
+  if (action === "exportBackup") {
+    await exportEncryptedBackup();
+  }
+  if (action === "importBackup") {
+    document.querySelector("[data-field='backupFile']")?.click();
   }
   if (action === "new") startEditor(null);
   if (action === "detail") {
