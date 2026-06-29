@@ -6,7 +6,6 @@ const UI_LABELS = {
   editNote: "メモ編集",
   noteDetail: "メモ詳細",
   importantNotes: "重要メモ",
-  needsReview: "確認が必要",
   expiredNotes: "期限切れメモ",
   recentNotes: "最近更新したメモ",
   searchPlaceholder: "キーワード・タグで検索",
@@ -18,8 +17,7 @@ const UI_LABELS = {
   addTag: "タグを追加",
   importance: "重要度",
   status: "状態",
-  validUntil: "有効期限終了日",
-  reviewDate: "確認日",
+  validUntil: "有効期限",
   checklist: "チェックリスト",
   save: "保存",
   delete: "削除",
@@ -89,8 +87,40 @@ const app = document.querySelector("#app");
 
 let notes = [];
 let route = { page: "home", id: null };
-let searchState = { query: "", tag: "", status: "", importance: "", date: "" };
+let searchState = { query: "", tag: "", status: "", importance: "", expiredOnly: "" };
 let editorState = null;
+
+function sameRoute(first, second) {
+  return first.page === second.page && first.id === second.id;
+}
+
+function syncEditorForRoute() {
+  if (route.page !== "edit") {
+    editorState = null;
+    return;
+  }
+  if (!route.id) {
+    editorState = editorState || blankEditor();
+    return;
+  }
+  const note = notes.find((item) => item.id === route.id);
+  editorState = note ? JSON.parse(JSON.stringify(note)) : blankEditor();
+}
+
+function navigate(nextRoute, { replace = false } = {}) {
+  if (sameRoute(route, nextRoute) && !replace) {
+    return;
+  }
+  route = nextRoute;
+  syncEditorForRoute();
+  const state = { route };
+  if (replace) {
+    history.replaceState(state, "", location.href);
+  } else {
+    history.pushState(state, "", location.href);
+  }
+  render();
+}
 
 function uid(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -105,7 +135,7 @@ function toDateOnly(value) {
 }
 
 function notePreviewDate(note) {
-  return note.validUntil ? `有効期限終了日 ${note.validUntil}` : `更新 ${toDateOnly(note.updatedAt)}`;
+  return note.validUntil ? `有効期限 ${note.validUntil}` : `更新 ${toDateOnly(note.updatedAt)}`;
 }
 
 function escapeHtml(value = "") {
@@ -188,7 +218,6 @@ function suggestTags(title, body) {
 function effectiveStatus(note) {
   if (note.status === "archived") return "archived";
   if (note.validUntil && note.validUntil < today()) return "expired";
-  if (note.reviewDate && note.reviewDate <= today()) return "needs_check";
   return note.status;
 }
 
@@ -224,8 +253,7 @@ function filteredNotes() {
     if (searchState.tag && !(note.tags || []).includes(searchState.tag)) return false;
     if (searchState.status && status !== searchState.status) return false;
     if (searchState.importance && note.importance !== searchState.importance) return false;
-    if (searchState.date === "expired" && status !== "expired") return false;
-    if (searchState.date === "review" && status !== "needs_check") return false;
+    if (searchState.expiredOnly === "expired" && status !== "expired") return false;
     return true;
   });
 }
@@ -273,7 +301,7 @@ async function createEncryptedBackup(password) {
     app: "work-memo",
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
-    notes
+    notes: notes.map(normalizeNote)
   };
   const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(payload)));
   return {
@@ -319,7 +347,6 @@ function normalizeNote(note) {
     importance: ["low", "normal", "high"].includes(note.importance) ? note.importance : "normal",
     status: ["active", "needs_check", "expired", "archived"].includes(note.status) ? note.status : "active",
     validUntil: note.validUntil || "",
-    reviewDate: note.reviewDate || "",
     tasks: Array.isArray(note.tasks)
       ? note.tasks.map((task) => ({
           id: String(task.id || uid("task")),
@@ -418,8 +445,7 @@ async function importEncryptedBackup(file) {
     if (!ok) return;
     await replaceAllNotes(importedNotes);
     notes = sortedNotes(await loadNotes());
-    route = { page: "home", id: null };
-    render();
+    navigate({ page: "home", id: null }, { replace: true });
     alert("バックアップを復元しました。");
   } catch (error) {
     alert("復元できませんでした。パスワードまたはファイルを確認してください。");
@@ -436,7 +462,7 @@ function noteCard(note) {
       <div class="meta">
         <span class="pill ${note.importance}">${IMPORTANCE_LABELS[note.importance]}</span>
         <span class="pill ${status}">${STATUS_LABELS[status]}</span>
-        ${note.validUntil ? `<span class="pill">有効期限終了日 ${escapeHtml(note.validUntil)}</span>` : ""}
+        ${note.validUntil ? `<span class="pill">有効期限 ${escapeHtml(note.validUntil)}</span>` : ""}
         ${tags}
       </div>
       <small class="count">${escapeHtml(notePreviewDate(note))}</small>
@@ -481,7 +507,6 @@ function shell(content) {
 function renderHome() {
   const ordered = sortedNotes(notes);
   const important = ordered.filter((note) => note.importance === "high").slice(0, 4);
-  const review = ordered.filter((note) => effectiveStatus(note) === "needs_check").slice(0, 4);
   const expired = ordered.filter((note) => effectiveStatus(note) === "expired").slice(0, 4);
   shell(`
     <div class="notice">このアプリは個人の業務メモ用です。お客様の個人情報、予約番号、電話番号、決済情報などの機密情報を保存しないでください。</div>
@@ -497,7 +522,6 @@ function renderHome() {
       </div>
     </div>
     ${section(UI_LABELS.importantNotes, important, "重要メモはまだありません")}
-    ${section(UI_LABELS.needsReview, review, "確認が必要なメモはありません")}
     ${section(UI_LABELS.expiredNotes, expired, "期限切れメモはありません")}
     ${section(UI_LABELS.recentNotes, ordered.slice(0, 6), "まだメモがありません")}
   `);
@@ -525,10 +549,9 @@ function renderSearch() {
         <option value="">すべての重要度</option>
         ${Object.entries(IMPORTANCE_LABELS).map(([value, label]) => `<option value="${value}" ${searchState.importance === value ? "selected" : ""}>${label}</option>`).join("")}
       </select>
-      <select class="select" data-field="date">
+      <select class="select" data-field="expiredOnly">
         <option value="">期限フィルターなし</option>
-        <option value="review" ${searchState.date === "review" ? "selected" : ""}>確認が必要</option>
-        <option value="expired" ${searchState.date === "expired" ? "selected" : ""}>期限切れ</option>
+        <option value="expired" ${searchState.expiredOnly === "expired" ? "selected" : ""}>期限切れ</option>
       </select>
     </div>
     <div data-search-results>${searchResultsHtml()}</div>
@@ -555,7 +578,6 @@ function blankEditor() {
     importance: "normal",
     status: "active",
     validUntil: "",
-    reviewDate: "",
     tasks: []
   };
 }
@@ -564,8 +586,7 @@ function startEditor(note) {
   editorState = note
     ? JSON.parse(JSON.stringify(note))
     : blankEditor();
-  route = { page: "edit", id: editorState.id };
-  render();
+  navigate({ page: "edit", id: editorState.id });
 }
 
 function renderEditor() {
@@ -626,15 +647,9 @@ function renderEditor() {
           ${Object.entries(STATUS_LABELS).map(([value, label]) => `<button class="btn ${state.status === value ? "active" : ""}" type="button" data-action="setStatus" data-value="${value}">${label}</button>`).join("")}
         </div>
       </div>
-      <div class="date-row">
-        <div class="field">
-          <label>${UI_LABELS.validUntil}</label>
-          <input class="input" type="date" data-edit="validUntil" value="${escapeHtml(state.validUntil || "")}" />
-        </div>
-        <div class="field">
-          <label>${UI_LABELS.reviewDate}</label>
-          <input class="input" type="date" data-edit="reviewDate" value="${escapeHtml(state.reviewDate || "")}" />
-        </div>
+      <div class="field">
+        <label>${UI_LABELS.validUntil}</label>
+        <input class="input" type="date" data-edit="validUntil" value="${escapeHtml(state.validUntil || "")}" />
       </div>
       <div class="field">
         <label>${UI_LABELS.checklist}</label>
@@ -660,8 +675,7 @@ function renderEditor() {
 function renderDetail() {
   const note = notes.find((item) => item.id === route.id);
   if (!note) {
-    route = { page: "home", id: null };
-    render();
+    navigate({ page: "home", id: null }, { replace: true });
     return;
   }
   const status = effectiveStatus(note);
@@ -677,8 +691,7 @@ function renderDetail() {
       <div class="meta">
         <span class="pill ${note.importance}">${IMPORTANCE_LABELS[note.importance]}</span>
         <span class="pill ${status}">${STATUS_LABELS[status]}</span>
-        ${note.validUntil ? `<span class="pill">有効期限終了日 ${escapeHtml(note.validUntil)}</span>` : ""}
-        ${note.reviewDate ? `<span class="pill">確認 ${escapeHtml(note.reviewDate)}</span>` : ""}
+        ${note.validUntil ? `<span class="pill">有効期限 ${escapeHtml(note.validUntil)}</span>` : ""}
       </div>
       <div class="tag-list">${(note.tags || []).map((tag) => `<button class="tag" data-action="tagSearch" data-tag="${escapeHtml(tag)}">#${escapeHtml(tag)}</button>`).join("")}</div>
       <div class="detail-body">${escapeHtml(note.body)}</div>
@@ -715,21 +728,24 @@ async function handleSave() {
   const autoTags = unique([...(editorState.autoTags || []), ...latestSuggestions].filter((tag) => !dismissed.includes(tag)));
   const manualTags = unique(editorState.manualTags || []);
   const note = {
-    ...editorState,
     id: editorState.id || uid("note"),
     title: editorState.title.trim(),
     body: editorState.body.trim(),
     autoTags,
+    dismissedAutoTags: unique(editorState.dismissedAutoTags || []),
     manualTags,
     tags: unique([...autoTags, ...manualTags]),
+    importance: editorState.importance,
+    status: editorState.status,
+    validUntil: editorState.validUntil || "",
+    tasks: editorState.tasks || [],
     createdAt: editorState.createdAt || now,
     updatedAt: now
   };
   await saveNote(note);
   notes = sortedNotes(await loadNotes());
   editorState = null;
-  route = { page: "detail", id: note.id };
-  render();
+  navigate({ page: "detail", id: note.id }, { replace: true });
 }
 
 app.addEventListener("input", (event) => {
@@ -764,7 +780,7 @@ app.addEventListener("change", (event) => {
     editorState[target.dataset.edit] = target.value;
     if (target.dataset.edit === "title" || target.dataset.edit === "body") renderEditor();
   }
-  if (["tag", "status", "importance", "date"].includes(target.dataset.field)) {
+  if (["tag", "status", "importance", "expiredOnly"].includes(target.dataset.field)) {
     searchState[target.dataset.field] = target.value;
     renderSearch();
   }
@@ -783,14 +799,12 @@ app.addEventListener("click", async (event) => {
   const { action, id, tag, value } = actionTarget.dataset;
 
   if (action === "home") {
-    route = { page: "home", id: null };
-    render();
+    navigate({ page: "home", id: null });
   }
   if (action === "search") {
     const quick = document.querySelector("[data-field='quickSearch']");
     if (quick) searchState.query = quick.value;
-    route = { page: "search", id: null };
-    render();
+    navigate({ page: "search", id: null });
   }
   if (action === "runSearch") {
     const query = document.querySelector("[data-field='query']");
@@ -805,8 +819,7 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "new") startEditor(null);
   if (action === "detail") {
-    route = { page: "detail", id };
-    render();
+    navigate({ page: "detail", id });
   }
   if (action === "edit") {
     const note = notes.find((item) => item.id === id);
@@ -816,15 +829,13 @@ app.addEventListener("click", async (event) => {
     if (confirm("このメモを削除しますか？")) {
       await removeNote(id);
       notes = sortedNotes(await loadNotes());
-      route = { page: "home", id: null };
-      render();
+      navigate({ page: "home", id: null }, { replace: true });
     }
   }
   if (action === "tagSearch") {
     searchState.query = `#${tag}`;
     searchState.tag = tag;
-    route = { page: "search", id: null };
-    render();
+    navigate({ page: "search", id: null });
   }
   if (!editorState) return;
   if (action === "toggleManualTag") {
@@ -882,8 +893,17 @@ app.addEventListener("click", async (event) => {
   }
 });
 
+window.addEventListener("popstate", (event) => {
+  route = event.state?.route || { page: "home", id: null };
+  syncEditorForRoute();
+  render();
+});
+
 async function init() {
   notes = sortedNotes(await loadNotes());
+  route = history.state?.route || route;
+  syncEditorForRoute();
+  history.replaceState({ route }, "", location.href);
   render();
 }
 

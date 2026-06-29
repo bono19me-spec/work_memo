@@ -353,12 +353,6 @@ button {
   color: var(--primary);
 }
 
-.date-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
 .task-row,
 .tag-input-row {
   display: flex;
